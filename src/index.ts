@@ -1,73 +1,73 @@
 #!/usr/bin/env node
-import 'dotenv/config';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { registerSearchTools } from './tools/search.js';
-import { registerProductTools } from './tools/product.js';
-import { registerVariantTools } from './tools/variants.js';
-import { registerStatusTools } from './tools/status.js';
-import { registerReviewTools } from './tools/reviews.js';
-import { registerShopTools } from './tools/shop.js';
-import { registerFlashSaleTools } from './tools/flashsale.js';
-import { registerCartTools } from './tools/cart.js';
-import { registerAccountTools } from './tools/account.js';
-import { registerActionTools } from './tools/actions.js';
-import { accountToolsSetting, initAccountMode, refreshAccountMode } from './account-mode.js';
-import { closeContext, DEBUG } from './browser/session.js';
+import { NodeRuntime, NodeStdio } from "@effect/platform-node"
+import { Effect, Layer, Logger, Option, Schema } from "effect"
+import { McpProtocol, McpServer } from "effect/ai"
+import { readFileSync } from "node:fs"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
+import { AccountMode } from "./AccountMode.js"
+import { ShopeeClient } from "./api/ShopeeClient.js"
+import { BrowserSession } from "./browser/BrowserSession.js"
+import { AppConfig } from "./Config.js"
+import { ShopeeRegistrations } from "./tools/Handlers.js"
 
-// Read the version from package.json at runtime so it can't drift from the
-// published package version (this file previously hardcoded a stale string).
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const pkg = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf-8')) as {
-  version: string;
-};
+const PackageVersionSchema = Schema.fromJsonString(
+  Schema.Struct({
+    version: Schema.optional(Schema.String)
+  })
+)
 
-async function main() {
-  const server = new McpServer({
-    name: 'shopee-mcp',
-    version: pkg.version,
-  });
+const readServerVersion = (): string => {
+  try {
+    const pkgPath = join(dirname(fileURLToPath(import.meta.url)), "../package.json")
+    const parsed = Schema.decodeUnknownOption(PackageVersionSchema)(readFileSync(pkgPath, "utf8"))
 
-  // Register tool groups. Every tool runs through the shared, logged-in browser
-  // session (see src/browser/session.ts) — sign in once with `npm run login`.
-  registerSearchTools(server);
-  registerProductTools(server);
-  registerVariantTools(server);
-  registerReviewTools(server);
-  registerShopTools(server);
-  registerFlashSaleTools(server);
-  registerStatusTools(server);
-  // Experimental account tools (reads of the user's own data, and the only
-  // tools that modify the account). Registered hidden; account mode shows them
-  // once the session is confirmed logged in (see src/account-mode.ts).
-  initAccountMode(server);
-  registerAccountTools(server);
-  registerCartTools(server);
-  registerActionTools(server);
-
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-
-  // Check the session in the background so a logged-in user gets the account
-  // tools without calling anything first; clients are notified via list_changed.
-  if (accountToolsSetting() === 'auto') void refreshAccountMode();
-
-  if (DEBUG) {
-    process.stderr.write('[shopee-mcp] Server started via stdio (browser-backed discovery)\n');
+    return Option.isSome(parsed) ? (parsed.value.version ?? "0.0.0") : "0.0.0"
+  } catch {
+    return "0.0.0"
   }
 }
 
-// Tidy up the browser on shutdown.
-for (const sig of ['SIGINT', 'SIGTERM'] as const) {
-  process.on(sig, () => {
-    void closeContext().finally(() => process.exit(0));
-  });
-}
+const StartupLayer = Layer.effectDiscard(
+  Effect.gen(function*() {
+    const config = yield* AppConfig
+    const mode = yield* AccountMode
+    const client = yield* ShopeeClient
 
-main().catch((err) => {
-  process.stderr.write(`[shopee-mcp] Fatal error: ${err}\n`);
-  process.exit(1);
-});
+    if (config.debug) {
+      yield* Effect.logInfo(
+        "[shopee-mcp] Server started via stdio (browser-backed discovery)"
+      )
+    }
+
+    if (config.accountTools === "auto") {
+      yield* Effect.forkScoped(mode.refresh(client.isLoggedIn))
+    }
+  })
+)
+
+const ServicesLayer = Layer.mergeAll(AccountMode.layer, ShopeeClient.layer).pipe(
+  Layer.provideMerge(BrowserSession.layer),
+  Layer.provideMerge(AppConfig.layer)
+)
+
+const ServerLayer = Layer.mergeAll(
+  StartupLayer,
+  McpServer.layerStdio({
+    name: "shopee-mcp",
+    version: readServerVersion(),
+    protocols: [
+      McpProtocol.v2025_11_25,
+      McpProtocol.v2025_06_18,
+      McpProtocol.v2025_03_26,
+      McpProtocol.v2024_11_05
+    ],
+    registrations: ShopeeRegistrations
+  })
+).pipe(
+  Layer.provide(ServicesLayer),
+  Layer.provide(NodeStdio.layer),
+  Layer.provideMerge(Layer.succeed(Logger.LogToStderr, true))
+)
+
+Layer.launch(ServerLayer).pipe(NodeRuntime.runMain)

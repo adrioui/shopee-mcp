@@ -6,59 +6,79 @@
  * in by hand (password, OTP, whatever Shopee asks), then saves the session so the
  * MCP server can reuse it. Run once; re-run only if the session expires.
  *
- *   npm run login        (dev)   or   shopee-mcp-login   (installed)
+ *   pnpm run login        (dev)   or   shopee-mcp-login   (installed)
  */
-import 'dotenv/config';
-import readline from 'node:readline';
-import { getContext, isLoggedIn, closeContext, BASE_URL, PROFILE_DIR } from './browser/session.js';
+import { NodeRuntime } from "@effect/platform-node"
+import { Console, Effect, Layer } from "effect"
+import readline from "node:readline"
+import { BrowserSession } from "./browser/BrowserSession.js"
+import { AppConfig } from "./Config.js"
 
-function prompt(question: string): Promise<void> {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise((resolve) =>
+const promptLine = (question: string): Effect.Effect<void> =>
+  Effect.callback<void>((resume) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+
     rl.question(question, () => {
-      rl.close();
-      resolve();
-    }),
-  );
-}
+      rl.close()
+      resume(Effect.void)
+    })
 
-async function main() {
-  console.log('\n🛒 Shopee MCP — login\n');
-  console.log(`Profile directory: ${PROFILE_DIR}`);
-  console.log('Opening a Chromium window…\n');
+    return Effect.sync(() => {
+      rl.close()
+    })
+  })
 
-  // Force a visible window regardless of SHOPEE_HEADLESS.
-  const ctx = await getContext(false);
-  const page = ctx.pages().find((p) => !p.isClosed()) ?? (await ctx.newPage());
+const program = Effect.gen(function*() {
+  const config = yield* AppConfig
+  const browser = yield* BrowserSession
 
-  await page.goto(`${BASE_URL}/buyer/login`, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  yield* Console.log("\n🛒 Shopee MCP — login\n")
+  yield* Console.log(`Profile directory: ${config.profileDir}`)
+  yield* Console.log("Opening a Chromium window…\n")
 
-  if (await isLoggedIn()) {
-    console.log('✅ This profile is already logged in. Nothing to do.\n');
-    await closeContext();
-    return;
+  const ctx = yield* browser.getContext(false)
+  const existing = ctx.pages().find((p) => !p.isClosed())
+
+  const page =
+    existing ??
+    (yield* Effect.tryPromise({
+      try: () => ctx.newPage(),
+      catch: (err) => new Error(err instanceof Error ? err.message : String(err))
+    }))
+
+  yield* Effect.tryPromise({
+    try: () =>
+      page.goto(`${config.baseUrl}/buyer/login`, {
+        waitUntil: "domcontentloaded",
+        timeout: 60_000
+      }),
+    catch: (err) => new Error(err instanceof Error ? err.message : String(err))
+  })
+
+  if (yield* browser.isLoggedIn) {
+    yield* Console.log("✅ This profile is already logged in. Nothing to do.\n")
+
+    return
   }
 
-  console.log('👉 In the Chromium window: log into your Shopee account.');
-  console.log('   Complete any OTP / captcha Shopee shows.');
-  await prompt('\nWhen you see your account is logged in, press Enter here to save… ');
+  yield* Console.log("👉 In the Chromium window: log into your Shopee account.")
+  yield* Console.log("   Complete any OTP / captcha Shopee shows.")
+  yield* promptLine("\nWhen you see your account is logged in, press Enter here to save… ")
 
-  const ok = await isLoggedIn();
-  if (ok) {
-    console.log('\n✅ Login detected and saved. You can close this and start the MCP server.\n');
+  if (yield* browser.isLoggedIn) {
+    yield* Console.log(
+      "\n✅ Login detected and saved. You can close this and start the MCP server.\n"
+    )
   } else {
-    console.log(
-      '\n⚠️  Could not detect a logged-in session (no SPC_U/SPC_EC cookie).\n' +
-        '   If you did log in, the session is still saved to the profile — try the server anyway.\n' +
-        '   Otherwise re-run `npm run login`.\n',
-    );
+    yield* Console.log(
+      "\n⚠️  Could not detect a logged-in session (no SPC_U/SPC_EC cookie).\n" +
+        "   If you did log in, the session is still saved to the profile — try the server anyway.\n" +
+        "   Otherwise re-run `pnpm run login`.\n"
+    )
   }
+}).pipe(
+  Effect.scoped,
+  Effect.provide(BrowserSession.layer.pipe(Layer.provideMerge(AppConfig.layer)))
+)
 
-  await closeContext();
-}
-
-main().catch(async (err) => {
-  console.error('Login failed:', err);
-  await closeContext().catch(() => {});
-  process.exit(1);
-});
+NodeRuntime.runMain(program)
