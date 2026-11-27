@@ -174,20 +174,24 @@ export class BrowserSession extends Context.Service<BrowserSession, BrowserSessi
           })
         })
 
-      const isLoggedIn = Effect.gen(function*() {
-        const ctx = yield* ensureContext()
+      const isLoggedIn = semaphore.withPermits(1)(
+        Effect.gen(function*() {
+          const ctx = yield* ensureContext()
 
-        const cookies = yield* Effect.tryPromise({
-          try: () => ctx.cookies(config.baseUrl),
-          catch: (err) =>
-            new ShopeeApiError({
-              message: `Failed to read cookies: ${errorMessage(err instanceof Error ? err : String(err))}`,
-              endpoint: "browser.cookies"
-            })
+          const cookies = yield* Effect.tryPromise({
+            try: () => ctx.cookies(config.baseUrl),
+            catch: (err) =>
+              new ShopeeApiError({
+                message: `Failed to read cookies: ${errorMessage(err instanceof Error ? err : String(err))}`,
+                endpoint: "browser.cookies"
+              })
+          })
+
+          return cookies.some(
+            (c) => (c.name === "SPC_U" || c.name === "SPC_EC") && c.value.length > 4
+          )
         })
-
-        return cookies.some((c) => (c.name === "SPC_U" || c.name === "SPC_EC") && c.value.length > 4)
-      }).pipe(Effect.withSpan("BrowserSession.isLoggedIn"))
+      ).pipe(Effect.withSpan("BrowserSession.isLoggedIn"))
 
       const captureJson = Effect.fn("BrowserSession.captureJson")(function*(
         pageUrl: string,
