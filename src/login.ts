@@ -31,6 +31,7 @@ const promptLine = (question: string): Effect.Effect<void> =>
 const program = Effect.gen(function*() {
   const config = yield* AppConfig
   const browser = yield* BrowserSession
+  const verifyMode = process.argv.includes("--verify")
 
   yield* Console.log("\n🛒 Shopee MCP — login\n")
   yield* Console.log(`Profile directory: ${config.profileDir}`)
@@ -46,24 +47,32 @@ const program = Effect.gen(function*() {
       catch: (err) => new Error(err instanceof Error ? err.message : String(err))
     }))
 
+  const targetUrl = verifyMode ? `${config.baseUrl}/search?keyword=sepeda` : `${config.baseUrl}/buyer/login`
+
   yield* Effect.tryPromise({
     try: () =>
-      page.goto(`${config.baseUrl}/buyer/login`, {
+      page.goto(targetUrl, {
         waitUntil: "domcontentloaded",
         timeout: 60_000
       }),
     catch: (err) => new Error(err instanceof Error ? err.message : String(err))
   })
 
-  if (yield* browser.isLoggedIn) {
-    yield* Console.log("✅ This profile is already logged in. Nothing to do.\n")
+  if (!verifyMode && (yield* browser.isLoggedIn)) {
+    yield* Console.log(
+      "✅ This profile is already logged in. Pass --verify to keep the window open for CAPTCHA verification.\n"
+    )
 
     return
   }
 
-  yield* Console.log("👉 In the Chromium window: log into your Shopee account.")
+  yield* Console.log(
+    verifyMode
+      ? "👉 In the Chromium window: complete any Shopee CAPTCHA / verification."
+      : "👉 In the Chromium window: log into your Shopee account."
+  )
   yield* Console.log("   Complete any OTP / captcha Shopee shows.")
-  yield* promptLine("\nWhen you see your account is logged in, press Enter here to save… ")
+  yield* promptLine("\nWhen you see normal search results / logged-in state, press Enter here to save… ")
 
   if (yield* browser.isLoggedIn) {
     yield* Console.log(
