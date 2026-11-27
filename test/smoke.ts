@@ -63,12 +63,15 @@ const CHECKS: ReadonlyArray<Check> = [
   },
   {
     tool: "get_shop_info",
-    args: () => ({ shopId: (discovered ?? { shopId: "1" }).shopId }),
+    args: () =>
+      discovered !== null
+        ? { shopId: discovered.shopId }
+        : { username: "royalkludge_official" },
     expect: ["Shop ID", "Could not read shop", "Not signed in to Shopee"]
   },
   {
     tool: "get_shop_products",
-    args: () => ({ shopId: (discovered ?? { shopId: "1" }).shopId, limit: 3 }),
+    args: () => ({ shopId: (discovered ?? { shopId: "1166009254" }).shopId, limit: 3 }),
     expect: ["Products from shop", "No products found", "Not signed in to Shopee"]
   },
   {

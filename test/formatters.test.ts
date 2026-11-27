@@ -229,12 +229,14 @@ describe("formatPrice & regionFor & parseAccountToolsSetting", () => {
     assert.strictEqual(regionFor("shopee.vn").currency, "IDR")
   })
 
-  it("parses account tools setting", () => {
-    assert.strictEqual(parseAccountToolsSetting(undefined), "auto")
-    assert.strictEqual(parseAccountToolsSetting("auto"), "auto")
-    assert.strictEqual(parseAccountToolsSetting("OFF"), "off")
+  it("parses account tools setting (read-only by default)", () => {
+    assert.strictEqual(parseAccountToolsSetting(undefined), "off")
+    assert.strictEqual(parseAccountToolsSetting("off"), "off")
     assert.strictEqual(parseAccountToolsSetting("false"), "off")
     assert.strictEqual(parseAccountToolsSetting("0"), "off")
+    assert.strictEqual(parseAccountToolsSetting("auto"), "auto")
+    assert.strictEqual(parseAccountToolsSetting("TRUE"), "auto")
+    assert.strictEqual(parseAccountToolsSetting("1"), "auto")
   })
 })
 

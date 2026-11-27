@@ -51,16 +51,34 @@ const StubBrowserLayer = Layer.succeed(
   })
 )
 
-const TestServicesLayer = Layer.mergeAll(AccountMode.layer, ShopeeClient.layer).pipe(
-  Layer.provideMerge(StubBrowserLayer),
-  Layer.provideMerge(AppConfig.layerTest())
-)
+const makeTestServices = (accountTools: "auto" | "off") =>
+  Layer.mergeAll(AccountMode.layer, ShopeeClient.layer).pipe(
+    Layer.provideMerge(StubBrowserLayer),
+    Layer.provideMerge(AppConfig.layerTest({ accountTools }))
+  )
 
 describe("Shopee MCP Server integration (McpTest + visibility)", () => {
-  it.effect("exposes 8 public tools when signed out and all 20 once check_login_status succeeds", () =>
+  it.effect("stays read-only (8 tools) by default even after check_login_status succeeds", () =>
     Effect.gen(function*() {
       const client = yield* McpTest.makeClient(
-        ShopeeRegistrations.pipe(Layer.provide(TestServicesLayer)),
+        ShopeeRegistrations.pipe(Layer.provide(makeTestServices("off"))),
+        {
+          protocols: [McpProtocol.v2025_11_25]
+        }
+      )
+
+      yield* client.callTool({ name: "check_login_status", arguments: {} })
+
+      const listed = yield* client.listTools()
+
+      assert.strictEqual(listed.tools.length, 8)
+      assert.isFalse(listed.tools.some((t) => t.name === "get_cart"))
+    }).pipe(Effect.scoped))
+
+  it.effect("exposes all 20 tools once check_login_status succeeds when accountTools is auto", () =>
+    Effect.gen(function*() {
+      const client = yield* McpTest.makeClient(
+        ShopeeRegistrations.pipe(Layer.provide(makeTestServices("auto"))),
         {
           protocols: [McpProtocol.v2025_11_25]
         }

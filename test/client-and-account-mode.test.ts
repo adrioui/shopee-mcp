@@ -1,10 +1,10 @@
 import { assert, describe, it } from "@effect/vitest"
-import { Duration, Effect, Exit, Layer, Schema } from "effect"
+import { Duration, Effect, Exit, Fiber, Layer, Schema } from "effect"
 import { TestClock } from "effect/testing"
 import { AccountMode } from "../src/AccountMode.js"
-import type { JsonValue } from "../src/api/Schemas.js"
+import type { CollectedResponse, JsonValue } from "../src/api/Schemas.js"
 import { ShopeeClient } from "../src/api/ShopeeClient.js"
-import { BrowserSession } from "../src/browser/BrowserSession.js"
+import { BrowserSession, waitForCollected } from "../src/browser/BrowserSession.js"
 import { AppConfig } from "../src/Config.js"
 import { ShopeeApiError } from "../src/Errors.js"
 
@@ -30,7 +30,48 @@ const makeBrowserStub = (opts: {
     })
   )
 
-describe("ShopeeClient capture retry, auth fast-fail, and TTL cache", () => {
+describe("waitForCollected (Effect Schedule + TestClock)", () => {
+  it.effect("polls with Schedule.spaced and resolves once condition holds", () =>
+    Effect.gen(function*() {
+      const collected: Array<CollectedResponse> = []
+      let ticks = 0
+
+      const fiber = yield* Effect.forkChild(
+        waitForCollected(
+          collected,
+          (c) => c.length >= 1,
+          "5 seconds",
+          Effect.sync(() => {
+            ticks++
+
+            if (ticks === 2) {
+              collected.push({ url: "api/v4/test", postData: "", json: {} })
+            }
+          })
+        )
+      )
+
+      yield* TestClock.adjust("2 seconds")
+
+      const ok = yield* Fiber.join(fiber)
+
+      assert.isTrue(ok)
+      assert.strictEqual(ticks, 2)
+    }))
+
+  it.effect("returns false when timeout expires without satisfying condition", () =>
+    Effect.gen(function*() {
+      const fiber = yield* Effect.forkChild(waitForCollected([], () => false, "1 second"))
+
+      yield* TestClock.adjust("2 seconds")
+
+      const ok = yield* Fiber.join(fiber)
+
+      assert.isFalse(ok)
+    }))
+})
+
+describe("ShopeeClient capture retry, auth fast-fail, and typed Cache.makeWith", () => {
   it.effect("recovers from a single timeout via retry when logged in", () =>
     Effect.gen(function*() {
       let calls = 0
@@ -120,50 +161,47 @@ describe("ShopeeClient capture retry, auth fast-fail, and TTL cache", () => {
       assert.strictEqual(calls, 1)
     }))
 
-  it.effect("caches text with TTL expiration and does not pin failures", () =>
+  it.effect("caches searchItems via Cache.makeWith with TTL expiration and does not pin failures", () =>
     Effect.gen(function*() {
       let calls = 0
 
       const browserLayer = makeBrowserStub({
         isLoggedIn: Effect.succeed(true),
-        captureJson: () => Effect.succeed({})
+        captureJson: (url) =>
+          Effect.suspend(() => {
+            calls++
+
+            if (url.includes("fail-once") && calls === 3) {
+              return Effect.fail(new ShopeeApiError({ message: "boom" }))
+            }
+
+            return Effect.succeed({ error: 0, total_count: calls, nomore: true, items: [] })
+          })
       })
 
       yield* Effect.gen(function*() {
         const client = yield* ShopeeClient
 
-        const first = yield* client.cachedText(
-          "k1",
-          Effect.sync(() => `v${++calls}`)
-        )
+        const first = yield* client.searchItems("/search?keyword=bike")
+        const second = yield* client.searchItems("/search?keyword=bike")
 
-        const second = yield* client.cachedText(
-          "k1",
-          Effect.sync(() => `v${++calls}`)
-        )
-
-        assert.strictEqual(first, "v1")
-        assert.strictEqual(second, "v1")
+        assert.strictEqual(first.total_count, 1)
+        assert.strictEqual(second.total_count, 1)
         assert.strictEqual(calls, 1)
 
         yield* TestClock.adjust("2 seconds")
 
-        const third = yield* client.cachedText(
-          "k1",
-          Effect.sync(() => `v${++calls}`)
-        )
+        const third = yield* client.searchItems("/search?keyword=bike")
 
-        assert.strictEqual(third, "v2")
+        assert.strictEqual(third.total_count, 2)
 
-        const failed = yield* Effect.exit(
-          client.cachedText("k2", Effect.fail(new ShopeeApiError({ message: "boom" })))
-        )
+        const failed = yield* Effect.exit(client.searchItems("/search?keyword=fail-once"))
 
         assert.isTrue(Exit.isFailure(failed))
 
-        const recovered = yield* client.cachedText("k2", Effect.succeed("ok"))
+        const recovered = yield* client.searchItems("/search?keyword=fail-once")
 
-        assert.strictEqual(recovered, "ok")
+        assert.strictEqual(recovered.total_count, 4)
       }).pipe(
         Effect.provide(ShopeeClient.layer),
         Effect.provide(browserLayer),
@@ -173,7 +211,16 @@ describe("ShopeeClient capture retry, auth fast-fail, and TTL cache", () => {
 })
 
 describe("AccountMode", () => {
-  it.effect("starts inactive, activates on login, and falls back on check failure", () =>
+  it.effect("starts inactive and stays inactive by default (read-only)", () =>
+    Effect.gen(function*() {
+      const mode = yield* AccountMode
+
+      yield* mode.setLoggedIn(true)
+
+      assert.strictEqual(yield* mode.isActive, false)
+    }).pipe(Effect.provide(AccountMode.layer), Effect.provide(AppConfig.layerTest())))
+
+  it.effect("activates on login when accountTools is auto and falls back on check failure", () =>
     Effect.gen(function*() {
       const mode = yield* AccountMode
 
@@ -186,17 +233,8 @@ describe("AccountMode", () => {
       yield* mode.refresh(Effect.fail(new Error("browser died")))
 
       assert.strictEqual(yield* mode.isActive, false)
-    }).pipe(Effect.provide(AccountMode.layer), Effect.provide(AppConfig.layerTest())))
-
-  it.effect("stays inactive when accountTools is off", () =>
-    Effect.gen(function*() {
-      const mode = yield* AccountMode
-
-      yield* mode.setLoggedIn(true)
-
-      assert.strictEqual(yield* mode.isActive, false)
     }).pipe(
       Effect.provide(AccountMode.layer),
-      Effect.provide(AppConfig.layerTest({ accountTools: "off" }))
+      Effect.provide(AppConfig.layerTest({ accountTools: "auto" }))
     ))
 })
