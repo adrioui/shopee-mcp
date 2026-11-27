@@ -1,6 +1,5 @@
-import { launchPersistentContext } from "cloakbrowser"
-import { Context, Effect, Layer, Option, Ref, Schema, Semaphore } from "effect"
-import type { BrowserContext, Page, Response } from "playwright"
+import { Context, Duration, Effect, Layer, Option, Ref, Schedule, Schema, Semaphore } from "effect"
+import { chromium, type BrowserContext, type Page, type Response } from "playwright"
 import type { CollectedResponse, JsonValue } from "../api/Schemas.js"
 import { AppConfig } from "../Config.js"
 import { ShopeeApiError } from "../Errors.js"
@@ -27,7 +26,7 @@ export interface SelectionOptions {
 export interface CollectOptions {
   readonly apiMatches: ReadonlyArray<string>
   readonly interact?:
-    | ((page: Page, collected: Array<CollectedResponse>) => Promise<void>)
+    | ((page: Page, collected: ReadonlyArray<CollectedResponse>) => Effect.Effect<void>)
     | undefined
   readonly timeoutMs?: number | undefined
 }
@@ -61,26 +60,36 @@ const errorMessage = (cause: Error | string): string =>
   cause instanceof Error ? cause.message : cause
 
 /**
- * Poll until `collected` satisfies `done`, or the timeout passes.
+ * Effect-native polling over `collected` using Schedule.spaced + Effect.timeoutOption.
+ * Works deterministically with TestClock in unit tests.
  */
-export const waitForCollected = async (
+export const waitForCollected = (
   collected: ReadonlyArray<CollectedResponse>,
   done: (c: ReadonlyArray<CollectedResponse>) => boolean,
-  timeoutMs: number,
-  tick?: () => Promise<void>
-): Promise<boolean> => {
-  const deadline = Date.now() + timeoutMs
+  timeout: Duration.Input,
+  tick?: Effect.Effect<void>
+): Effect.Effect<boolean> =>
+  Effect.gen(function*() {
+    const check = Effect.gen(function*() {
+      if (done(collected)) return true
 
-  while (Date.now() < deadline) {
-    if (done(collected)) return true
+      if (tick !== undefined) {
+        yield* tick.pipe(Effect.ignore)
+      }
 
-    if (tick !== undefined) await tick()
+      return false
+    })
 
-    await new Promise((r) => setTimeout(r, 500))
-  }
+    const result = yield* check.pipe(
+      Effect.repeat({
+        schedule: Schedule.spaced("500 millis"),
+        until: (satisfied) => satisfied
+      }),
+      Effect.timeoutOption(timeout)
+    )
 
-  return done(collected)
-}
+    return Option.isSome(result) ? result.value : done(collected)
+  })
 
 export class BrowserSession extends Context.Service<BrowserSession, BrowserSessionService>()(
   "shopee-mcp/BrowserSession"
@@ -119,21 +128,30 @@ export class BrowserSession extends Context.Service<BrowserSession, BrowserSessi
           const headless = headlessOverride ?? config.headless
 
           yield* logDebug(
-            `Launching CloakBrowser (headless=${headless}, locale=${config.locale}, tz=${config.timezone}) with profile: ${config.profileDir}`
+            `Launching Chromium (${config.executablePath ?? "playwright-bundled"}, headless=${headless}, locale=${config.locale}, tz=${config.timezone}) with profile: ${config.profileDir}`
           )
 
+          const launchOptions: NonNullable<
+            Parameters<typeof chromium.launchPersistentContext>[1]
+          > = {
+            headless,
+            userAgent: USER_AGENT,
+            locale: config.locale,
+            timezoneId: config.timezone,
+            viewport: { width: 1366, height: 768 },
+            args: [
+              "--disable-blink-features=AutomationControlled",
+              "--no-sandbox",
+              "--disable-dev-shm-usage"
+            ]
+          }
+
+          if (config.executablePath !== undefined) {
+            launchOptions.executablePath = config.executablePath
+          }
+
           const ctx = yield* Effect.tryPromise({
-            try: () =>
-              launchPersistentContext({
-                userDataDir: config.profileDir,
-                headless,
-                userAgent: USER_AGENT,
-                locale: config.locale,
-                timezone: config.timezone,
-                viewport: { width: 1366, height: 768 },
-                humanize: true,
-                args: ["--no-sandbox", "--disable-dev-shm-usage"]
-              }),
+            try: () => chromium.launchPersistentContext(config.profileDir, launchOptions),
             catch: (err) =>
               new ShopeeApiError({
                 message: `Failed to launch browser: ${errorMessage(err instanceof Error ? err : String(err))}`,
@@ -141,12 +159,9 @@ export class BrowserSession extends Context.Service<BrowserSession, BrowserSessi
               })
           })
 
-          // SAFETY: CloakBrowser wraps Playwright's launchPersistentContext and returns a compatible BrowserContext.
-          const typedCtx = ctx as BrowserContext
+          yield* Ref.set(contextRef, Option.some(ctx))
 
-          yield* Ref.set(contextRef, Option.some(typedCtx))
-
-          return typedCtx
+          return ctx
         })
 
       const getContext = Effect.fn("BrowserSession.getContext")(function*(
@@ -348,60 +363,64 @@ export class BrowserSession extends Context.Service<BrowserSession, BrowserSessi
         return yield* semaphore.withPermits(1)(
           Effect.gen(function*() {
             const page = yield* getPageUnsafe()
+            const collected: Array<CollectedResponse> = []
+            const pending: Array<Promise<void>> = []
 
-            return yield* Effect.tryPromise({
-              try: async () => {
-                const collected: Array<CollectedResponse> = []
-                const pending: Array<Promise<void>> = []
+            const onResponse = (r: Response): void => {
+              const url = r.url()
 
-                const onResponse = (r: Response): void => {
-                  const url = r.url()
+              if (
+                !/\/api\/v\d+\//.test(url) ||
+                !opts.apiMatches.some((m) => url.includes(m))
+              ) {
+                return
+              }
 
-                  if (
-                    !/\/api\/v\d+\//.test(url) ||
-                    !opts.apiMatches.some((m) => url.includes(m))
-                  ) {
-                    return
-                  }
+              const postData = r.request().postData() ?? ""
 
-                  const postData = r.request().postData() ?? ""
+              pending.push(
+                r
+                  .json()
+                  .then((raw) => {
+                    const decoded = decodeJsonValue(raw)
 
-                  pending.push(
-                    r
-                      .json()
-                      .then((raw) => {
-                        const decoded = decodeJsonValue(raw)
+                    if (Option.isSome(decoded)) {
+                      collected.push({ url, postData, json: decoded.value })
+                    }
+                  })
+                  .catch(() => undefined)
+              )
+            }
 
-                        if (Option.isSome(decoded)) {
-                          collected.push({ url, postData, json: decoded.value })
-                        }
-                      })
-                      .catch(() => undefined)
-                  )
-                }
+            page.on("response", onResponse)
 
-                page.on("response", onResponse)
+            return yield* Effect.gen(function*() {
+              yield* Effect.tryPromise({
+                try: () => page.goto(pageUrl, { waitUntil: "domcontentloaded", timeout: timeoutMs }),
+                catch: (err) =>
+                  new ShopeeApiError({
+                    message: `Browser error loading ${opts.apiMatches[0] ?? pageUrl}: ${errorMessage(err instanceof Error ? err : String(err))}`,
+                    endpoint: opts.apiMatches[0] ?? pageUrl
+                  })
+              })
 
-                try {
-                  await page.goto(pageUrl, { waitUntil: "domcontentloaded", timeout: timeoutMs })
+              if (opts.interact !== undefined) {
+                yield* opts.interact(page, collected)
+              }
 
-                  if (opts.interact !== undefined) {
-                    await opts.interact(page, collected)
-                  }
+              yield* Effect.tryPromise({
+                try: () => Promise.all(pending),
+                catch: () => undefined
+              }).pipe(Effect.ignore)
 
-                  await Promise.all(pending)
-                } finally {
+              return collected
+            }).pipe(
+              Effect.ensuring(
+                Effect.sync(() => {
                   page.off("response", onResponse)
-                }
-
-                return collected
-              },
-              catch: (err) =>
-                new ShopeeApiError({
-                  message: `Browser error loading ${opts.apiMatches[0] ?? pageUrl}: ${errorMessage(err instanceof Error ? err : String(err))}`,
-                  endpoint: opts.apiMatches[0] ?? pageUrl
                 })
-            })
+              )
+            )
           })
         )
       })
