@@ -14,7 +14,6 @@ import {
   PdpResponse,
   RatingsResponse,
   SaveVoucherResponse,
-  SearchItemsResponse,
   SelectVariationResponse,
   ShopBaseResponse,
   ShopTabResponse,
@@ -109,43 +108,60 @@ const responseSucceeded = (c: CollectedResponse | undefined): boolean => {
   return Option.isSome(env) && (env.value.error ?? 0) === 0
 }
 
+const wheelDown = (page: Page, deltaY: number): Effect.Effect<void> =>
+  Effect.tryPromise({
+    try: () => page.mouse.wheel(0, deltaY),
+    catch: () => undefined
+  }).pipe(Effect.ignore)
+
 // ─── DOM interaction helpers (executed inside browser page) ───────────────────
 
-const clickReviewFilter = (page: Page, filter: string): Promise<boolean> =>
-  page.evaluate((f: string) => {
-    const chips = Array.from(
-      document.querySelectorAll<HTMLElement>(".product-rating-overview__filter")
-    )
+const clickReviewFilter = (page: Page, filter: string): Effect.Effect<boolean> =>
+  Effect.tryPromise({
+    try: () =>
+      page.evaluate((f: string) => {
+        const chips = Array.from(
+          document.querySelectorAll<HTMLElement>(".product-rating-overview__filter")
+        )
 
-    const labelled = chips.map((c) => ({ c, t: (c.textContent || "").trim().toLowerCase() }))
+        const labelled = chips.map((c) => ({ c, t: (c.textContent || "").trim().toLowerCase() }))
 
-    let hit: { c: HTMLElement; t: string } | undefined
+        let hit: { c: HTMLElement; t: string } | undefined
 
-    if (/^[1-5]$/.test(f)) hit = labelled.find((x) => x.t.startsWith(`${f} `))
-    else if (f === "with_comments") hit = labelled.find((x) => /comment|komentar|評論|评论/.test(x.t))
-    else if (f === "with_media") hit = labelled.find((x) => /media|foto|照片|相片/.test(x.t))
+        if (/^[1-5]$/.test(f)) hit = labelled.find((x) => x.t.startsWith(`${f} `))
+        else if (f === "with_comments") {
+          hit = labelled.find((x) => /comment|komentar|評論|评论/.test(x.t))
+        } else if (f === "with_media") {
+          hit = labelled.find((x) => /media|foto|照片|相片/.test(x.t))
+        }
 
-    const chip = hit?.c
+        const chip = hit?.c
 
-    if (!chip) return false
+        if (!chip) return false
 
-    chip.click()
+        chip.click()
 
-    return true
-  }, filter)
+        return true
+      }, filter),
+    catch: () => undefined
+  }).pipe(Effect.orElseSucceed(() => false))
 
-const clickNextReviewPage = (page: Page): Promise<boolean> =>
-  page.evaluate(() => {
-    const next = document.querySelector<HTMLButtonElement>(
-      ".product-ratings__page-controller .shopee-icon-button--right"
-    )
+const clickNextReviewPage = (page: Page): Effect.Effect<boolean> =>
+  Effect.tryPromise({
+    try: () =>
+      page.evaluate(() => {
+        const next = document.querySelector<HTMLButtonElement>(
+          ".product-ratings__page-controller .shopee-icon-button--right"
+        )
 
-    if (!next || next.disabled) return false
+        if (!next || next.disabled) return false
 
-    next.click()
+        next.click()
 
-    return true
-  })
+        return true
+      }),
+    catch: () => undefined
+  }).pipe(Effect.orElseSucceed(() => false))
 
 const clickVariantOption = (page: Page, label: string): Promise<boolean> =>
   page.evaluate((l: string) => {
@@ -215,60 +231,68 @@ const clickAddToCart = (page: Page): Promise<boolean> =>
     return true
   })
 
-const clickInCartRow = (page: Page, line: CartItem, control: string): Promise<boolean> =>
-  page.evaluate(
-    ({ shopid, itemid, variant, ctrl }) => {
-      const links = Array.from(document.querySelectorAll("a")).filter((a) =>
-        (a.getAttribute("href") || "").includes(`i.${shopid}.${itemid}`)
-      )
-
-      for (const link of links) {
-        let row: HTMLElement | null = link
-
-        for (let i = 0; i < 12 && row; i++) {
-          const hasControls = Array.from(row.querySelectorAll("button")).some(
-            (b) => (b.getAttribute("aria-label") || b.textContent || "").trim() === ctrl
+const clickInCartRow = (page: Page, line: CartItem, control: string): Effect.Effect<boolean> =>
+  Effect.tryPromise({
+    try: () =>
+      page.evaluate(
+        ({ shopid, itemid, variant, ctrl }) => {
+          const links = Array.from(document.querySelectorAll("a")).filter((a) =>
+            (a.getAttribute("href") || "").includes(`i.${shopid}.${itemid}`)
           )
 
-          if (hasControls && row.querySelector("input")) break
+          for (const link of links) {
+            let row: HTMLElement | null = link
 
-          row = row.parentElement
-        }
+            for (let i = 0; i < 12 && row; i++) {
+              const hasControls = Array.from(row.querySelectorAll("button")).some(
+                (b) => (b.getAttribute("aria-label") || b.textContent || "").trim() === ctrl
+              )
 
-        if (!row) continue
+              if (hasControls && row.querySelector("input")) break
 
-        if (variant && !(row.textContent || "").includes(variant)) continue
+              row = row.parentElement
+            }
 
-        const btn = Array.from(row.querySelectorAll("button")).find(
-          (b) => (b.getAttribute("aria-label") || b.textContent || "").trim() === ctrl
+            if (!row) continue
+
+            if (variant && !(row.textContent || "").includes(variant)) continue
+
+            const btn = Array.from(row.querySelectorAll("button")).find(
+              (b) => (b.getAttribute("aria-label") || b.textContent || "").trim() === ctrl
+            )
+
+            if (!btn || btn.disabled) return false
+
+            btn.click()
+
+            return true
+          }
+
+          return false
+        },
+        { shopid: line.shopid, itemid: line.itemid, variant: line.model_name || "", ctrl: control }
+      ),
+    catch: () => undefined
+  }).pipe(Effect.orElseSucceed(() => false))
+
+const clickButtonByPattern = (page: Page, pattern: string): Effect.Effect<string | null> =>
+  Effect.tryPromise({
+    try: () =>
+      page.evaluate((src: string) => {
+        const re = new RegExp(src, "i")
+
+        const b = Array.from(document.querySelectorAll("button")).find((x) =>
+          re.test((x.textContent || "").trim())
         )
 
-        if (!btn || btn.disabled) return false
+        if (!b) return null
 
-        btn.click()
+        b.click()
 
-        return true
-      }
-
-      return false
-    },
-    { shopid: line.shopid, itemid: line.itemid, variant: line.model_name || "", ctrl: control }
-  )
-
-const clickButtonByPattern = (page: Page, pattern: string): Promise<string | null> =>
-  page.evaluate((src: string) => {
-    const re = new RegExp(src, "i")
-
-    const b = Array.from(document.querySelectorAll("button")).find((x) =>
-      re.test((x.textContent || "").trim())
-    )
-
-    if (!b) return null
-
-    b.click()
-
-    return (b.textContent || "").trim()
-  }, pattern)
+        return (b.textContent || "").trim()
+      }, pattern),
+    catch: () => undefined
+  }).pipe(Effect.orElseSucceed(() => null))
 
 const cartEditsForItem = (
   got: ReadonlyArray<CollectedResponse>,
@@ -317,38 +341,33 @@ const PublicHandlersLayer = PublicToolkit.toLayer(
           officialMallOnly: params.officialMallOnly
         }
 
-        const cacheKey = `search:${params.query}:${page}:${limit}:${sort}:${JSON.stringify(filters)}`
-
         return yield* catchErr(
-          client.cachedText(
-            cacheKey,
-            Effect.gen(function*() {
-              const searchUrl = client.shopeeUrl(buildSearchPath(params.query, page, sort, filters))
-              const data = yield* client.capture(searchUrl, "search/search_items", SearchItemsResponse)
-              const items = flattenSearchItems(data.items)
+          Effect.gen(function*() {
+            const searchPath = buildSearchPath(params.query, page, sort, filters)
+            const data = yield* client.searchItems(searchPath)
+            const items = flattenSearchItems(data.items)
 
-              if (items.length === 0) {
-                const filtered = Object.values(filters).some((v) => v !== undefined)
+            if (items.length === 0) {
+              const filtered = Object.values(filters).some((v) => v !== undefined)
 
-                return (
-                  `No products found for "${params.query}"` +
-                  (filtered
-                    ? " with these filters. Try loosening them."
-                    : ". Try a different keyword.")
-                )
-              }
+              return (
+                `No products found for "${params.query}"` +
+                (filtered
+                  ? " with these filters. Try loosening them."
+                  : ". Try a different keyword.")
+              )
+            }
 
-              return formatResultList(items, {
-                title: `🛒 Search Results for "${params.query}"`,
-                page,
-                limit,
-                totalCount: data.total_count ?? 0,
-                nomore: data.nomore ?? false,
-                baseUrl: config.baseUrl,
-                currency: config.currency
-              })
+            return formatResultList(items, {
+              title: `🛒 Search Results for "${params.query}"`,
+              page,
+              limit,
+              totalCount: data.total_count ?? 0,
+              nomore: data.nomore ?? false,
+              baseUrl: config.baseUrl,
+              currency: config.currency
             })
-          )
+          })
         )
       }),
 
@@ -362,15 +381,11 @@ const PublicHandlersLayer = PublicToolkit.toLayer(
         if (Option.isNone(idsOpt)) return MISSING_PRODUCT_LOCATOR
 
         const { shopId: sid, itemId: iid } = idsOpt.value
-        const cacheKey = `product:${sid}:${iid}`
 
         return yield* catchErr(
-          client.cachedText(
-            cacheKey,
-            client
-              .capture(client.shopeeUrl(`/product/${sid}/${iid}`), "pdp/get_pc", PdpResponse)
-              .pipe(Effect.map((data) => formatProductDetail(data, config.baseUrl, config.currency)))
-          )
+          client
+            .getProductPdp(sid, iid)
+            .pipe(Effect.map((data) => formatProductDetail(data, config.baseUrl, config.currency)))
         )
       }),
 
@@ -386,66 +401,62 @@ const PublicHandlersLayer = PublicToolkit.toLayer(
 
         const { shopId: sid, itemId: iid } = idsOpt.value
         const fetchStock = includeStock ?? false
-        const cacheKey = `variants:${sid}:${iid}:${fetchStock}`
 
         return yield* catchErr(
-          client.cachedText(
-            cacheKey,
-            Effect.gen(function*() {
+          Effect.gen(function*() {
+            let data: PdpResponse
+            let stockByName: Map<string, number> | undefined
+
+            if (fetchStock) {
               const pageUrl = client.shopeeUrl(`/product/${sid}/${iid}`)
 
-              let data: PdpResponse
-              let stockByName: Map<string, number> | undefined
+              const { primary, selections } = yield* client.captureWithSelections(pageUrl, {
+                apiMatch: "pdp/get_pc",
+                selectionApiMatch: "cart_panel/select_variation_pc",
+                maxSelections: MAX_STOCK_LOOKUPS,
+                labelsFrom: (p) => {
+                  const parsed = decodePdp(p)
 
-              if (fetchStock) {
-                const { primary, selections } = yield* client.captureWithSelections(pageUrl, {
-                  apiMatch: "pdp/get_pc",
-                  selectionApiMatch: "cart_panel/select_variation_pc",
-                  maxSelections: MAX_STOCK_LOOKUPS,
-                  labelsFrom: (p) => {
-                    const parsed = decodePdp(p)
-
-                    return Option.isSome(parsed)
-                      ? (parsed.value.data?.item.models ?? []).map((m) => m.name)
-                      : []
-                  }
-                })
-
-                const parsedPrimary = decodePdp(primary)
-
-                if (Option.isNone(parsedPrimary)) {
-                  return "❌ Could not read product data. Check the shopId/itemId or URL."
+                  return Option.isSome(parsed)
+                    ? (parsed.value.data?.item.models ?? []).map((m) => m.name)
+                    : []
                 }
+              })
 
-                data = parsedPrimary.value
-                stockByName = new Map()
+              const parsedPrimary = decodePdp(primary)
 
-                for (const [name, selJson] of selections) {
-                  const sel = decodeSelectVariation(selJson)
-
-                  if (Option.isSome(sel)) {
-                    const n = sel.value.data?.stock
-
-                    if (n !== undefined && n !== null) {
-                      stockByName.set(name, n)
-                    }
-                  }
-                }
-              } else {
-                data = yield* client.capture(pageUrl, "pdp/get_pc", PdpResponse)
-              }
-
-              const item = data.data?.item
-
-              if (item === undefined) {
+              if (Option.isNone(parsedPrimary)) {
                 return "❌ Could not read product data. Check the shopId/itemId or URL."
               }
 
-              const rows = buildVariantRows(item.models, stockByName)
+              data = parsedPrimary.value
+              stockByName = new Map()
 
-              return formatVariants(item, rows, fetchStock, config.baseUrl, config.currency)
-            })
-          )
+              for (const [name, selJson] of selections) {
+                const sel = decodeSelectVariation(selJson)
+
+                if (Option.isSome(sel)) {
+                  const n = sel.value.data?.stock
+
+                  if (n !== undefined && n !== null) {
+                    stockByName.set(name, n)
+                  }
+                }
+              }
+            } else {
+              data = yield* client.getProductPdp(sid, iid)
+            }
+
+            const item = data.data?.item
+
+            if (item === undefined) {
+              return "❌ Could not read product data. Check the shopId/itemId or URL."
+            }
+
+            const rows = buildVariantRows(item.models, stockByName)
+
+            return formatVariants(item, rows, fetchStock, config.baseUrl, config.currency)
+          })
         )
       }),
 
@@ -463,41 +474,46 @@ const PublicHandlersLayer = PublicToolkit.toLayer(
         const ids = idsOpt.value
         const chosenFilter = filter ?? "all"
         const requestedPage = page ?? 1
-        const cacheKey = `reviews:${ids.shopId}:${ids.itemId}:${chosenFilter}:${requestedPage}`
 
         return yield* catchErr(
-          client.cachedText(
-            cacheKey,
-            Effect.gen(function*() {
-              let reachedPage = 1
-              let filterMissing = false
-              const isRatings = (c: CollectedResponse): boolean => c.url.includes(RATINGS_API)
-              const pageUrl = client.shopeeUrl(`/product/${ids.shopId}/${ids.itemId}`)
+          Effect.gen(function*() {
+            let reachedPage = 1
+            let filterMissing = false
+            const isRatings = (c: CollectedResponse): boolean => c.url.includes(RATINGS_API)
+            const pageUrl = client.shopeeUrl(`/product/${ids.shopId}/${ids.itemId}`)
 
-              const collected = yield* client.captureAll(pageUrl, {
-                apiMatches: [RATINGS_API],
-                interact: async (p, got) => {
+            const collected = yield* client.captureAll(pageUrl, {
+              apiMatches: [RATINGS_API],
+              interact: (p, got) =>
+                Effect.gen(function*() {
                   const count = (): number => got.filter(isRatings).length
 
-                  const loaded = await waitForCollected(
+                  const loaded = yield* waitForCollected(
                     got,
                     () => count() > 0,
-                    30_000,
-                    () => p.mouse.wheel(0, 800)
+                    "30 seconds",
+                    wheelDown(p, 800)
                   )
 
                   if (!loaded) return
 
                   if (chosenFilter !== "all") {
                     const before = count()
+                    const clicked = yield* clickReviewFilter(p, chosenFilter)
 
-                    if (!(await clickReviewFilter(p, chosenFilter))) {
+                    if (!clicked) {
                       filterMissing = true
 
                       return
                     }
 
-                    if (!(await waitForCollected(got, () => count() > before, 12_000))) {
+                    const filtered = yield* waitForCollected(
+                      got,
+                      () => count() > before,
+                      "12 seconds"
+                    )
+
+                    if (!filtered) {
                       filterMissing = true
 
                       return
@@ -506,93 +522,99 @@ const PublicHandlersLayer = PublicToolkit.toLayer(
 
                   for (let n = 2; n <= requestedPage; n++) {
                     const before = count()
+                    const clickedNext = yield* clickNextReviewPage(p)
 
-                    if (!(await clickNextReviewPage(p))) break
+                    if (!clickedNext) break
 
-                    if (!(await waitForCollected(got, () => count() > before, 12_000))) break
+                    const paged = yield* waitForCollected(
+                      got,
+                      () => count() > before,
+                      "12 seconds"
+                    )
+
+                    if (!paged) break
 
                     reachedPage = n
                   }
-                }
-              })
-
-              if (filterMissing) {
-                return `❌ Could not apply the "${chosenFilter}" review filter on this product (there may be no such reviews). Try filter="all".`
-              }
-
-              const lastRaw = collected.filter(isRatings).at(-1)
-              const lastOpt = lastRaw !== undefined ? decodeRatings(lastRaw.json) : Option.none()
-
-              if (Option.isNone(lastOpt)) {
-                return yield* new ShopeeApiError({
-                  message:
-                    "Reviews never loaded on the product page. Check the IDs, or retry — Shopee lazy-loads them.",
-                  endpoint: RATINGS_API
                 })
-              }
-
-              const last = lastOpt.value
-
-              if (last.error) {
-                return yield* new ShopeeApiError({
-                  message: `Shopee API error ${last.error}${last.error_msg ? `: ${last.error_msg}` : ""}`,
-                  statusCode: 200,
-                  endpoint: RATINGS_API,
-                  shopeeError: last.error
-                })
-              }
-
-              const ratings = last.data?.ratings ?? []
-              const summary = last.data?.item_rating_summary
-              const lines: Array<string> = [`💬 **Reviews** for product \`${ids.itemId}\``]
-
-              if (summary !== null && summary !== undefined) {
-                lines.push(
-                  `📊 ${summary.rating_total.toLocaleString("id-ID")} ratings | ${starBreakdown(summary)}`
-                )
-
-                const extras = [
-                  summary.rcount_with_context !== undefined
-                    ? `${summary.rcount_with_context.toLocaleString("id-ID")} with comments`
-                    : "",
-                  summary.rcount_with_media !== undefined
-                    ? `${summary.rcount_with_media.toLocaleString("id-ID")} with media`
-                    : ""
-                ].filter(Boolean)
-
-                if (extras.length > 0) lines.push(`   ${extras.join(" | ")}`)
-              }
-
-              lines.push(`🔎 Filter: ${chosenFilter} | Page ${reachedPage}`, "")
-
-              if (ratings.length === 0) {
-                lines.push("No reviews match this filter.")
-              } else {
-                ratings.forEach((r, i) => {
-                  lines.push(formatReview(r, (reachedPage - 1) * REVIEWS_PER_PAGE + i + 1))
-
-                  if (i < ratings.length - 1) lines.push("")
-                })
-              }
-
-              if (reachedPage < requestedPage) {
-                lines.push(
-                  "",
-                  `⚠️ Only reached page ${reachedPage} of the ${requestedPage} requested — no more reviews.`
-                )
-              } else if (
-                last.data?.has_more !== false &&
-                ratings.length === REVIEWS_PER_PAGE &&
-                requestedPage < MAX_REVIEW_PAGE
-              ) {
-                lines.push("", `📄 Use page=${requestedPage + 1} for more.`)
-              }
-
-              lines.push("", `🔗 ${config.baseUrl}/product/${ids.shopId}/${ids.itemId}`)
-
-              return lines.join("\n")
             })
-          )
+
+            if (filterMissing) {
+              return `❌ Could not apply the "${chosenFilter}" review filter on this product (there may be no such reviews). Try filter="all".`
+            }
+
+            const lastRaw = collected.filter(isRatings).at(-1)
+            const lastOpt = lastRaw !== undefined ? decodeRatings(lastRaw.json) : Option.none()
+
+            if (Option.isNone(lastOpt)) {
+              return yield* new ShopeeApiError({
+                message:
+                  "Reviews never loaded on the product page. Check the IDs, or retry — Shopee lazy-loads them.",
+                endpoint: RATINGS_API
+              })
+            }
+
+            const last = lastOpt.value
+
+            if (last.error) {
+              return yield* new ShopeeApiError({
+                message: `Shopee API error ${last.error}${last.error_msg ? `: ${last.error_msg}` : ""}`,
+                statusCode: 200,
+                endpoint: RATINGS_API,
+                shopeeError: last.error
+              })
+            }
+
+            const ratings = last.data?.ratings ?? []
+            const summary = last.data?.item_rating_summary
+            const lines: Array<string> = [`💬 **Reviews** for product \`${ids.itemId}\``]
+
+            if (summary !== null && summary !== undefined) {
+              lines.push(
+                `📊 ${summary.rating_total.toLocaleString("id-ID")} ratings | ${starBreakdown(summary)}`
+              )
+
+              const extras = [
+                summary.rcount_with_context !== undefined
+                  ? `${summary.rcount_with_context.toLocaleString("id-ID")} with comments`
+                  : "",
+                summary.rcount_with_media !== undefined
+                  ? `${summary.rcount_with_media.toLocaleString("id-ID")} with media`
+                  : ""
+              ].filter(Boolean)
+
+              if (extras.length > 0) lines.push(`   ${extras.join(" | ")}`)
+            }
+
+            lines.push(`🔎 Filter: ${chosenFilter} | Page ${reachedPage}`, "")
+
+            if (ratings.length === 0) {
+              lines.push("No reviews match this filter.")
+            } else {
+              ratings.forEach((r, i) => {
+                lines.push(formatReview(r, (reachedPage - 1) * REVIEWS_PER_PAGE + i + 1))
+
+                if (i < ratings.length - 1) lines.push("")
+              })
+            }
+
+            if (reachedPage < requestedPage) {
+              lines.push(
+                "",
+                `⚠️ Only reached page ${reachedPage} of the ${requestedPage} requested — no more reviews.`
+              )
+            } else if (
+              last.data?.has_more !== false &&
+              ratings.length === REVIEWS_PER_PAGE &&
+              requestedPage < MAX_REVIEW_PAGE
+            ) {
+              lines.push("", `📄 Use page=${requestedPage + 1} for more.`)
+            }
+
+            lines.push("", `🔗 ${config.baseUrl}/product/${ids.shopId}/${ids.itemId}`)
+
+            return lines.join("\n")
+          })
         )
       }),
 
@@ -603,31 +625,21 @@ const PublicHandlersLayer = PublicToolkit.toLayer(
           return "❌ Please provide a `shopId` or a shop `username`."
         }
 
-        const cacheKey = `shop:${shopId ?? `@${handle}`}`
-
         return yield* catchErr(
-          client.cachedText(
-            cacheKey,
-            Effect.gen(function*() {
-              const path =
-                shopId !== undefined && shopId !== ""
-                  ? `/shop/${shopId}`
-                  : `/${encodeURIComponent(handle ?? "")}`
+          Effect.gen(function*() {
+            const path =
+              shopId !== undefined && shopId !== ""
+                ? `/shop/${shopId}`
+                : `/${encodeURIComponent(handle ?? "")}`
 
-              const data = yield* client.capture(
-                client.shopeeUrl(path),
-                "shop/get_shop_base_v2",
-                ShopBaseResponse,
-                { allowAnonymous: true }
-              )
+            const data = yield* client.getShopBase(path)
 
-              if (data.data === null || data.data === undefined || !data.data.shopid) {
-                return "❌ Could not read shop data. Check the shopId or username."
-              }
+            if (data.data === null || data.data === undefined || !data.data.shopid) {
+              return "❌ Could not read shop data. Check the shopId or username."
+            }
 
-              return formatShop(data.data, config.baseUrl)
-            })
-          )
+            return formatShop(data.data, config.baseUrl)
+          })
         )
       }),
 
@@ -640,128 +652,117 @@ const PublicHandlersLayer = PublicToolkit.toLayer(
         const currentPage = page ?? 1
         const maxItems = limit ?? 20
         const sortOrder = sort ?? "popular"
-        const cacheKey = `shop-products:${shopId}:${currentPage}:${maxItems}:${sortOrder}`
 
         return yield* catchErr(
-          client.cachedText(
-            cacheKey,
-            Effect.gen(function*() {
-              const data = yield* client.capture(
-                client.shopeeUrl(buildShopProductsPath(shopId, currentPage, sortOrder)),
-                "search/search_items",
-                SearchItemsResponse
-              )
+          Effect.gen(function*() {
+            const data = yield* client.searchItems(
+              buildShopProductsPath(shopId, currentPage, sortOrder)
+            )
 
-              const items = flattenSearchItems(data.items)
+            const items = flattenSearchItems(data.items)
 
-              if (items.length === 0) {
-                return `No products found for shop \`${shopId}\`${currentPage > 1 ? ` on page ${currentPage}` : ""}.`
-              }
+            if (items.length === 0) {
+              return `No products found for shop \`${shopId}\`${currentPage > 1 ? ` on page ${currentPage}` : ""}.`
+            }
 
-              return formatResultList(items, {
-                title: `🏪 Products from shop \`${shopId}\``,
-                page: currentPage,
-                limit: maxItems,
-                totalCount: data.total_count ?? 0,
-                nomore: data.nomore ?? false,
-                baseUrl: config.baseUrl,
-                currency: config.currency
-              })
+            return formatResultList(items, {
+              title: `🏪 Products from shop \`${shopId}\``,
+              page: currentPage,
+              limit: maxItems,
+              totalCount: data.total_count ?? 0,
+              nomore: data.nomore ?? false,
+              baseUrl: config.baseUrl,
+              currency: config.currency
             })
-          )
+          })
         )
       }),
 
       get_flash_sale: Effect.fn("tool.get_flash_sale")(function*({ limit }) {
         const maxDeals = limit ?? 20
-        const cacheKey = `flash:${maxDeals}`
 
         return yield* catchErr(
-          client.cachedText(
-            cacheKey,
-            Effect.gen(function*() {
-              const collected = yield* client.captureAll(client.shopeeUrl("/flash_sale"), {
-                apiMatches: [SESSIONS_API, ITEMS_API],
-                interact: async (page, got) => {
-                  await waitForCollected(
-                    got,
-                    (c) => collectFlashItems(c).length >= maxDeals,
-                    Math.min(45_000, 12_000 + maxDeals * 600),
-                    () => page.mouse.wheel(0, 900)
-                  )
-                }
-              })
-
-              const sessionsRaw = findCollected(collected, SESSIONS_API)
-
-              const sessionsOpt =
-                sessionsRaw !== undefined ? decodeFlashSessions(sessionsRaw.json) : Option.none()
-
-              const sessions = Option.isSome(sessionsOpt)
-                ? (sessionsOpt.value.data?.sessions ?? [])
-                : []
-
-              const items = collectFlashItems(collected)
-
-              if (items.length === 0) {
-                return yield* new ShopeeApiError({
-                  message:
-                    "No flash-sale deals loaded. There may be no active session, or retry — Shopee lazy-loads them.",
-                  endpoint: ITEMS_API
-                })
-              }
-
-              const current = sessions.find((s) => s.is_ongoing) ?? sessions[0]
-              const lines: Array<string> = ["⚡ **Shopee Flash Sale**"]
-
-              if (current !== undefined) {
-                lines.push(
-                  `🕒 ${current.is_ongoing ? "Now" : "Next"}: ${formatTime(current.start_time, config.timezone)} – ${formatTime(current.end_time, config.timezone)} (${config.timezone})`
-                )
-              }
-
-              const upcoming = sessions.filter(
-                (s) => s !== current && s.start_time > (current?.start_time ?? 0)
-              )
-
-              if (upcoming.length > 0) {
-                lines.push(
-                  `⏭ Upcoming: ${upcoming.map((s) => formatTime(s.start_time, config.timezone)).join(", ")}`
-                )
-              }
-
-              lines.push("")
-
-              const shown = items.slice(0, maxDeals)
-
-              shown.forEach((it, i) => {
-                const before =
-                  it.price_before_discount && it.price_before_discount > it.price
-                    ? ` ~~${formatPrice(it.price_before_discount, config.currency)}~~`
-                    : ""
-
-                const meta = [
-                  it.discount ? `🏷 ${it.discount}` : "",
-                  flashStockText(it),
-                  it.item_rating?.rating_star ? `⭐ ${it.item_rating.rating_star.toFixed(1)}` : "",
-                  `🆔 ${it.itemid}`
-                ].filter(Boolean)
-
-                lines.push(`${i + 1}. **${it.name}**`)
-                lines.push(`   💰 ${formatPrice(it.price, config.currency)}${before}`)
-                lines.push(`   ${meta.join(" | ")}`)
-                lines.push(`   🔗 ${config.baseUrl}/product/${it.shopid}/${it.itemid}`)
-
-                if (i < shown.length - 1) lines.push("")
-              })
-
-              if (shown.length < maxDeals) {
-                lines.push("", `ℹ️ Only ${shown.length} deals loaded within the time budget.`)
-              }
-
-              return lines.join("\n")
+          Effect.gen(function*() {
+            const collected = yield* client.captureAll(client.shopeeUrl("/flash_sale"), {
+              apiMatches: [SESSIONS_API, ITEMS_API],
+              interact: (page, got) =>
+                waitForCollected(
+                  got,
+                  (c) => collectFlashItems(c).length >= maxDeals,
+                  Math.min(45_000, 12_000 + maxDeals * 600),
+                  wheelDown(page, 900)
+                ).pipe(Effect.asVoid)
             })
-          )
+
+            const sessionsRaw = findCollected(collected, SESSIONS_API)
+
+            const sessionsOpt =
+              sessionsRaw !== undefined ? decodeFlashSessions(sessionsRaw.json) : Option.none()
+
+            const sessions = Option.isSome(sessionsOpt)
+              ? (sessionsOpt.value.data?.sessions ?? [])
+              : []
+
+            const items = collectFlashItems(collected)
+
+            if (items.length === 0) {
+              return yield* new ShopeeApiError({
+                message:
+                  "No flash-sale deals loaded. There may be no active session, or retry — Shopee lazy-loads them.",
+                endpoint: ITEMS_API
+              })
+            }
+
+            const current = sessions.find((s) => s.is_ongoing) ?? sessions[0]
+            const lines: Array<string> = ["⚡ **Shopee Flash Sale**"]
+
+            if (current !== undefined) {
+              lines.push(
+                `🕒 ${current.is_ongoing ? "Now" : "Next"}: ${formatTime(current.start_time, config.timezone)} – ${formatTime(current.end_time, config.timezone)} (${config.timezone})`
+              )
+            }
+
+            const upcoming = sessions.filter(
+              (s) => s !== current && s.start_time > (current?.start_time ?? 0)
+            )
+
+            if (upcoming.length > 0) {
+              lines.push(
+                `⏭ Upcoming: ${upcoming.map((s) => formatTime(s.start_time, config.timezone)).join(", ")}`
+              )
+            }
+
+            lines.push("")
+
+            const shown = items.slice(0, maxDeals)
+
+            shown.forEach((it, i) => {
+              const before =
+                it.price_before_discount && it.price_before_discount > it.price
+                  ? ` ~~${formatPrice(it.price_before_discount, config.currency)}~~`
+                  : ""
+
+              const meta = [
+                it.discount ? `🏷 ${it.discount}` : "",
+                flashStockText(it),
+                it.item_rating?.rating_star ? `⭐ ${it.item_rating.rating_star.toFixed(1)}` : "",
+                `🆔 ${it.itemid}`
+              ].filter(Boolean)
+
+              lines.push(`${i + 1}. **${it.name}**`)
+              lines.push(`   💰 ${formatPrice(it.price, config.currency)}${before}`)
+              lines.push(`   ${meta.join(" | ")}`)
+              lines.push(`   🔗 ${config.baseUrl}/product/${it.shopid}/${it.itemid}`)
+
+              if (i < shown.length - 1) lines.push("")
+            })
+
+            if (shown.length < maxDeals) {
+              lines.push("", `ℹ️ Only ${shown.length} deals loaded within the time budget.`)
+            }
+
+            return lines.join("\n")
+          })
         )
       }),
 
@@ -774,7 +775,7 @@ const PublicHandlersLayer = PublicToolkit.toLayer(
 
             const modeNote =
               config.accountTools === "off"
-                ? "Account tools are turned off (SHOPEE_ACCOUNT_TOOLS=off) — read-only mode."
+                ? "Account tools are turned off (default read-only mode; set SHOPEE_ACCOUNT_TOOLS=auto to opt in)."
                 : "Experimental account tools (orders, vouchers, coins, notifications, cart, likes, follows) are enabled."
 
             return loggedIn
@@ -832,15 +833,14 @@ const AccountHandlersLayer = AccountToolkit.toLayer(
               client.shopeeUrl(`/user/purchase/?type=${orderTabType(chosenStatus)}`),
               {
                 apiMatches: ["order/get_order_list", "order/get_all_order_and_checkout_list"],
-                interact: async (page, got) => {
-                  await waitForCollected(
+                interact: (page, got) =>
+                  waitForCollected(
                     got,
                     (c) =>
                       collectOrders(c.filter(isOrderList)).length >= maxOrders || listIsDone(c),
                     Math.min(45_000, 10_000 + maxOrders * 1200),
-                    () => page.mouse.wheel(0, 1200)
-                  )
-                }
+                    wheelDown(page, 1200)
+                  ).pipe(Effect.asVoid)
               }
             )
 
@@ -918,9 +918,8 @@ const AccountHandlersLayer = AccountToolkit.toLayer(
           Effect.gen(function*() {
             const got = yield* client.captureAll(client.shopeeUrl("/user/coin"), {
               apiMatches: ["coin/get_user_coins_summary", "coin/get_user_coin_transaction_list"],
-              interact: async (_page, c) => {
-                await waitForCollected(c, (x) => x.length >= 2, 20_000)
-              }
+              interact: (_page, c) =>
+                waitForCollected(c, (x) => x.length >= 2, "20 seconds").pipe(Effect.asVoid)
             })
 
             const summaryRaw = findCollected(got, "get_user_coins_summary")
@@ -976,9 +975,8 @@ const AccountHandlersLayer = AccountToolkit.toLayer(
               client.shopeeUrl(`/user/notifications/${tab.path}`),
               {
                 apiMatches: ["notification/get_notifications"],
-                interact: async (_page, c) => {
-                  await waitForCollected(c, (x) => x.some(isTab), 20_000)
-                }
+                interact: (_page, c) =>
+                  waitForCollected(c, (x) => x.some(isTab), "20 seconds").pipe(Effect.asVoid)
               }
             )
 
@@ -1033,7 +1031,7 @@ const AccountHandlersLayer = AccountToolkit.toLayer(
         return yield* catchErr(
           Effect.gen(function*() {
             const productUrl = client.shopeeUrl(`/product/${ids.shopId}/${ids.itemId}`)
-            const data = yield* client.capture(productUrl, "pdp/get_pc", PdpResponse)
+            const data = yield* client.getProductPdp(ids.shopId, ids.itemId)
             const item = data.data?.item
 
             if (item === undefined) {
@@ -1061,7 +1059,9 @@ const AccountHandlersLayer = AccountToolkit.toLayer(
             }
 
             const labelsOpt =
-              model !== undefined ? modelOptionLabels(item, model) : Option.some<ReadonlyArray<string>>([])
+              model !== undefined
+                ? modelOptionLabels(item, model)
+                : Option.some<ReadonlyArray<string>>([])
 
             if (Option.isNone(labelsOpt)) {
               return "❌ Could not map this variant to the page’s options. Nothing was added."
@@ -1180,96 +1180,101 @@ const AccountHandlersLayer = AccountToolkit.toLayer(
 
             yield* client.captureAll(client.shopeeUrl("/cart"), {
               apiMatches: ["cart/get", "cart/update"],
-              interact: async (page, got) => {
-                const loaded = await waitForCollected(
-                  got,
-                  (c) => c.some((x) => x.url.includes("cart/get")),
-                  30_000
-                )
+              interact: (page, got) =>
+                Effect.gen(function*() {
+                  const loaded = yield* waitForCollected(
+                    got,
+                    (c) => c.some((x) => x.url.includes("cart/get")),
+                    "30 seconds"
+                  )
 
-                const cartRaw = findCollected(got, "cart/get")
-                const cartOpt = cartRaw !== undefined ? decodeCart(cartRaw.json) : Option.none()
+                  const cartRaw = findCollected(got, "cart/get")
+                  const cartOpt = cartRaw !== undefined ? decodeCart(cartRaw.json) : Option.none()
 
-                if (!loaded || Option.isNone(cartOpt)) {
-                  outcome = "❌ The cart did not load. Nothing was changed."
-
-                  return
-                }
-
-                const { matches, item: itemOpt } = findCartItem(
-                  cartOpt.value.data?.cart_blocks ?? [],
-                  itemId,
-                  modelId
-                )
-
-                if (matches.length === 0) {
-                  outcome = `❌ Item ${itemId}${modelId ? ` (model_id ${modelId})` : ""} is not in your cart. Nothing was changed.`
-
-                  return
-                }
-
-                if (Option.isNone(itemOpt)) {
-                  outcome = `❌ Item ${itemId} is in your cart in ${matches.length} variants — pass the exact \`modelId\` from get_cart. Nothing was changed.`
-
-                  return
-                }
-
-                const item = itemOpt.value
-
-                line = item
-                await page.waitForTimeout(1500)
-
-                const diff = quantity - item.quantity
-
-                if (quantity === 0) {
-                  if (!(await clickInCartRow(page, item, "Delete"))) {
-                    outcome = "❌ Could not find this line’s Delete button. Nothing was changed."
+                  if (!loaded || Option.isNone(cartOpt)) {
+                    outcome = "❌ The cart did not load. Nothing was changed."
 
                     return
                   }
 
-                  await waitForCollected(
-                    got,
-                    (c) => cartEditsForItem(c, item.itemid).length > 0,
-                    12_000
+                  const { matches, item: itemOpt } = findCartItem(
+                    cartOpt.value.data?.cart_blocks ?? [],
+                    itemId,
+                    modelId
                   )
-                  applied = cartEditsForItem(got, item.itemid).length
 
-                  return
-                }
+                  if (matches.length === 0) {
+                    outcome = `❌ Item ${itemId}${modelId ? ` (model_id ${modelId})` : ""} is not in your cart. Nothing was changed.`
 
-                if (diff === 0) {
-                  outcome = `ℹ️ Quantity is already ${quantity}. Nothing was changed.`
-
-                  return
-                }
-
-                if (Math.abs(diff) > MAX_QUANTITY_STEP) {
-                  outcome = `❌ That changes the quantity by ${Math.abs(diff)}; the limit is ${MAX_QUANTITY_STEP} per call. Nothing was changed.`
-
-                  return
-                }
-
-                for (let n = 0; n < Math.abs(diff); n++) {
-                  const before = cartEditsForItem(got, item.itemid).length
-
-                  if (!(await clickInCartRow(page, item, diff > 0 ? "Increase" : "Decrease"))) {
-                    break
+                    return
                   }
 
-                  if (
-                    !(await waitForCollected(
+                  if (Option.isNone(itemOpt)) {
+                    outcome = `❌ Item ${itemId} is in your cart in ${matches.length} variants — pass the exact \`modelId\` from get_cart. Nothing was changed.`
+
+                    return
+                  }
+
+                  const item = itemOpt.value
+
+                  line = item
+                  yield* Effect.sleep("1500 millis")
+
+                  const diff = quantity - item.quantity
+
+                  if (quantity === 0) {
+                    const clickedDelete = yield* clickInCartRow(page, item, "Delete")
+
+                    if (!clickedDelete) {
+                      outcome = "❌ Could not find this line’s Delete button. Nothing was changed."
+
+                      return
+                    }
+
+                    yield* waitForCollected(
+                      got,
+                      (c) => cartEditsForItem(c, item.itemid).length > 0,
+                      "12 seconds"
+                    )
+                    applied = cartEditsForItem(got, item.itemid).length
+
+                    return
+                  }
+
+                  if (diff === 0) {
+                    outcome = `ℹ️ Quantity is already ${quantity}. Nothing was changed.`
+
+                    return
+                  }
+
+                  if (Math.abs(diff) > MAX_QUANTITY_STEP) {
+                    outcome = `❌ That changes the quantity by ${Math.abs(diff)}; the limit is ${MAX_QUANTITY_STEP} per call. Nothing was changed.`
+
+                    return
+                  }
+
+                  for (let n = 0; n < Math.abs(diff); n++) {
+                    const before = cartEditsForItem(got, item.itemid).length
+
+                    const clickedStep = yield* clickInCartRow(
+                      page,
+                      item,
+                      diff > 0 ? "Increase" : "Decrease"
+                    )
+
+                    if (!clickedStep) break
+
+                    const updated = yield* waitForCollected(
                       got,
                       (c) => cartEditsForItem(c, item.itemid).length > before,
-                      12_000
-                    ))
-                  ) {
-                    break
-                  }
-                }
+                      "12 seconds"
+                    )
 
-                applied = cartEditsForItem(got, item.itemid).length
-              }
+                    if (!updated) break
+                  }
+
+                  applied = cartEditsForItem(got, item.itemid).length
+                })
             })
 
             if (outcome !== undefined) return outcome
@@ -1312,33 +1317,44 @@ const AccountHandlersLayer = AccountToolkit.toLayer(
               client.shopeeUrl(`/product/${ids.shopId}/${ids.itemId}`),
               {
                 apiMatches: ["pdp/get_pc", action],
-                interact: async (page, c) => {
-                  if (!(await waitForCollected(c, (x) => findCollected(x, "pdp/get_pc") !== undefined, 30_000))) {
-                    return
-                  }
+                interact: (page, c) =>
+                  Effect.gen(function*() {
+                    const loaded = yield* waitForCollected(
+                      c,
+                      (x) => findCollected(x, "pdp/get_pc") !== undefined,
+                      "30 seconds"
+                    )
 
-                  const pdpRaw = findCollected(c, "pdp/get_pc")
-                  const pdpOpt = pdpRaw !== undefined ? decodePdp(pdpRaw.json) : Option.none()
+                    if (!loaded) return
 
-                  if (Option.isSome(pdpOpt)) {
-                    const liked = pdpOpt.value.data?.product_review?.liked
+                    const pdpRaw = findCollected(c, "pdp/get_pc")
+                    const pdpOpt = pdpRaw !== undefined ? decodePdp(pdpRaw.json) : Option.none()
 
-                    already = liked ?? undefined
-                  }
+                    if (Option.isSome(pdpOpt)) {
+                      const liked = pdpOpt.value.data?.product_review?.liked
 
-                  if (already === wantLike) return
+                      already = liked ?? undefined
+                    }
 
-                  await page.waitForTimeout(1500)
-                  clicked =
-                    (await clickButtonByPattern(
+                    if (already === wantLike) return
+
+                    yield* Effect.sleep("1500 millis")
+
+                    const clickedBtn = yield* clickButtonByPattern(
                       page,
                       "^(favorite|favorit|disukai|suka|喜歡|喜欢)\\s*\\("
-                    )) !== null
+                    )
 
-                  if (clicked) {
-                    await waitForCollected(c, (x) => findCollected(x, action) !== undefined, 12_000)
-                  }
-                }
+                    clicked = clickedBtn !== null
+
+                    if (clicked) {
+                      yield* waitForCollected(
+                        c,
+                        (x) => findCollected(x, action) !== undefined,
+                        "12 seconds"
+                      )
+                    }
+                  })
               }
             )
 
@@ -1375,39 +1391,48 @@ const AccountHandlersLayer = AccountToolkit.toLayer(
 
             const got = yield* client.captureAll(client.shopeeUrl(`/shop/${shopId}`), {
               apiMatches: ["shop/get_shop_base_v2", action],
-              interact: async (page, c) => {
-                if (
-                  !(await waitForCollected(
+              interact: (page, c) =>
+                Effect.gen(function*() {
+                  const loaded = yield* waitForCollected(
                     c,
                     (x) => findCollected(x, "get_shop_base_v2") !== undefined,
-                    30_000
-                  ))
-                ) {
-                  return
-                }
+                    "30 seconds"
+                  )
 
-                const baseRaw = findCollected(c, "get_shop_base_v2")
-                const baseOpt = baseRaw !== undefined ? decodeShopBase(baseRaw.json) : Option.none()
+                  if (!loaded) return
 
-                if (Option.isSome(baseOpt) && baseOpt.value.data != null) {
-                  already = baseOpt.value.data.followed
+                  const baseRaw = findCollected(c, "get_shop_base_v2")
 
-                  if (baseOpt.value.data.name) name = baseOpt.value.data.name
-                }
+                  const baseOpt =
+                    baseRaw !== undefined ? decodeShopBase(baseRaw.json) : Option.none()
 
-                if (already === wantFollow) return
+                  if (Option.isSome(baseOpt) && baseOpt.value.data != null) {
+                    already = baseOpt.value.data.followed
 
-                await page.waitForTimeout(1500)
-                clicked =
-                  (await clickButtonByPattern(
+                    if (baseOpt.value.data.name) name = baseOpt.value.data.name
+                  }
+
+                  if (already === wantFollow) return
+
+                  yield* Effect.sleep("1500 millis")
+
+                  const clickedBtn = yield* clickButtonByPattern(
                     page,
-                    wantFollow ? "^(follow|ikuti|關注|关注)$" : "^(following|mengikuti|已關注|已关注)$"
-                  )) !== null
+                    wantFollow
+                      ? "^(follow|ikuti|關注|关注)$"
+                      : "^(following|mengikuti|已關注|已关注)$"
+                  )
 
-                if (clicked) {
-                  await waitForCollected(c, (x) => findCollected(x, action) !== undefined, 12_000)
-                }
-              }
+                  clicked = clickedBtn !== null
+
+                  if (clicked) {
+                    yield* waitForCollected(
+                      c,
+                      (x) => findCollected(x, action) !== undefined,
+                      "12 seconds"
+                    )
+                  }
+                })
             })
 
             if (already === undefined) {
@@ -1434,9 +1459,8 @@ const AccountHandlersLayer = AccountToolkit.toLayer(
           Effect.gen(function*() {
             const got = yield* client.captureAll(client.shopeeUrl(`/shop/${shopId}`), {
               apiMatches: ["shop/get_shop_tab"],
-              interact: async (_page, c) => {
-                await waitForCollected(c, (x) => x.length > 0, 30_000)
-              }
+              interact: (_page, c) =>
+                waitForCollected(c, (x) => x.length > 0, "30 seconds").pipe(Effect.asVoid)
             })
 
             const tabRaw = got[0]
@@ -1465,76 +1489,86 @@ const AccountHandlersLayer = AccountToolkit.toLayer(
 
             const got = yield* client.captureAll(client.shopeeUrl(`/shop/${shopId}`), {
               apiMatches: ["shop/get_shop_tab", "voucher_wallet/save_voucher"],
-              interact: async (page, c) => {
-                if (
-                  !(await waitForCollected(
+              interact: (page, c) =>
+                Effect.gen(function*() {
+                  const loaded = yield* waitForCollected(
                     c,
                     (x) => findCollected(x, "get_shop_tab") !== undefined,
-                    30_000
-                  ))
-                ) {
-                  outcome = "❌ Could not read the shop page. Nothing was claimed."
+                    "30 seconds"
+                  )
 
-                  return
-                }
+                  if (!loaded) {
+                    outcome = "❌ Could not read the shop page. Nothing was claimed."
 
-                const tabRaw = findCollected(c, "get_shop_tab")
-                const tabOpt = tabRaw !== undefined ? decodeShopTab(tabRaw.json) : Option.none()
-                const vouchers = shopVouchersFrom(Option.getOrUndefined(tabOpt))
-                const index = vouchers.findIndex((v) => v.voucher_code === voucherCode)
+                    return
+                  }
 
-                if (index < 0) {
-                  outcome = `❌ Shop ${shopId} has no voucher \`${voucherCode}\` right now (see get_shop_vouchers). Nothing was claimed.`
+                  const tabRaw = findCollected(c, "get_shop_tab")
+                  const tabOpt = tabRaw !== undefined ? decodeShopTab(tabRaw.json) : Option.none()
+                  const vouchers = shopVouchersFrom(Option.getOrUndefined(tabOpt))
+                  const index = vouchers.findIndex((v) => v.voucher_code === voucherCode)
 
-                  return
-                }
+                  if (index < 0) {
+                    outcome = `❌ Shop ${shopId} has no voucher \`${voucherCode}\` right now (see get_shop_vouchers). Nothing was claimed.`
 
-                target = vouchers[index]
+                    return
+                  }
 
-                if (target.is_claimed_before) {
-                  outcome = `ℹ️ You already claimed \`${voucherCode}\`. Nothing was changed.`
+                  target = vouchers[index]
 
-                  return
-                }
+                  if (target.is_claimed_before) {
+                    outcome = `ℹ️ You already claimed \`${voucherCode}\`. Nothing was changed.`
 
-                await page.waitForTimeout(1500)
+                    return
+                  }
 
-                const clicked = await page.evaluate(
-                  ({ all, claim, idx, total }) => {
-                    const btns = Array.from(document.querySelectorAll("button")).filter((b) =>
-                      new RegExp(all, "i").test((b.textContent || "").trim())
-                    )
+                  yield* Effect.sleep("1500 millis")
 
-                    if (btns.length !== total) return `mismatch:${btns.length}`
+                  const clicked = yield* Effect.tryPromise({
+                    try: () =>
+                      page.evaluate(
+                        ({ all, claim, idx, total }) => {
+                          const btns = Array.from(document.querySelectorAll("button")).filter((b) =>
+                            new RegExp(all, "i").test((b.textContent || "").trim())
+                          )
 
-                    const b = btns[idx]
+                          if (btns.length !== total) return `mismatch:${btns.length}`
 
-                    if (!new RegExp(claim, "i").test((b.textContent || "").trim())) {
-                      return "not-claimable"
-                    }
+                          const b = btns[idx]
 
-                    b.click()
+                          if (!new RegExp(claim, "i").test((b.textContent || "").trim())) {
+                            return "not-claimable"
+                          }
 
-                    return "ok"
-                  },
-                  { all: VOUCHER_BUTTON, claim: VOUCHER_CLAIM, idx: index, total: vouchers.length }
-                )
+                          b.click()
 
-                if (clicked !== "ok") {
-                  outcome =
-                    clicked === "not-claimable"
-                      ? `ℹ️ \`${voucherCode}\` is not claimable (already claimed or fully used). Nothing was changed.`
-                      : `❌ The page’s voucher buttons didn’t line up with the shop’s voucher list (${clicked}), so nothing was clicked.`
+                          return "ok"
+                        },
+                        {
+                          all: VOUCHER_BUTTON,
+                          claim: VOUCHER_CLAIM,
+                          idx: index,
+                          total: vouchers.length
+                        }
+                      ),
+                    catch: () => undefined
+                  }).pipe(Effect.orElseSucceed(() => "error"))
 
-                  return
-                }
+                  if (clicked !== "ok") {
+                    outcome =
+                      clicked === "not-claimable"
+                        ? `ℹ️ \`${voucherCode}\` is not claimable (already claimed or fully used). Nothing was changed.`
+                        : `❌ The page’s voucher buttons didn’t line up with the shop’s voucher list (${clicked}), so nothing was clicked.`
 
-                await waitForCollected(
-                  c,
-                  (x) => findCollected(x, "save_voucher") !== undefined,
-                  12_000
-                )
-              }
+                    return
+                  }
+
+                  yield* waitForCollected(
+                    c,
+                    (x) => findCollected(x, "save_voucher") !== undefined,
+                    "12 seconds"
+                  )
+                })
             })
 
             if (outcome !== undefined) return outcome

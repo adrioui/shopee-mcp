@@ -1,4 +1,4 @@
-import { Cache, Context, Duration, Effect, Exit, Layer, Option, Schema } from "effect"
+import { Cache, Context, Data, Duration, Effect, Exit, Layer, Option, Schema } from "effect"
 import type { Page } from "playwright"
 import {
   BrowserSession,
@@ -12,7 +12,14 @@ import {
   ShopeeAuthRequiredError,
   type ShopeeError
 } from "../Errors.js"
-import { ApiErrorEnvelope, type CollectedResponse, type JsonValue } from "./Schemas.js"
+import {
+  ApiErrorEnvelope,
+  PdpResponse,
+  SearchItemsResponse,
+  ShopBaseResponse,
+  type CollectedResponse,
+  type JsonValue
+} from "./Schemas.js"
 
 const decodeErrorEnvelope = Schema.decodeUnknownOption(ApiErrorEnvelope)
 
@@ -20,6 +27,19 @@ export interface ShopeeCaptureOptions {
   readonly timeoutMs?: number | undefined
   readonly allowAnonymous?: boolean | undefined
 }
+
+class SearchCacheKey extends Data.Class<{
+  readonly path: string
+}> {}
+
+class ProductCacheKey extends Data.Class<{
+  readonly shopId: string
+  readonly itemId: string
+}> {}
+
+class ShopInfoCacheKey extends Data.Class<{
+  readonly path: string
+}> {}
 
 export interface ShopeeClientService {
   readonly shopeeUrl: (pathAndQuery: string) => string
@@ -31,6 +51,12 @@ export interface ShopeeClientService {
     schema: Schema.Codec<A, I>,
     options?: ShopeeCaptureOptions
   ) => Effect.Effect<A, ShopeeError>
+  readonly searchItems: (searchPath: string) => Effect.Effect<SearchItemsResponse, ShopeeError>
+  readonly getProductPdp: (
+    shopId: string,
+    itemId: string
+  ) => Effect.Effect<PdpResponse, ShopeeError>
+  readonly getShopBase: (shopPath: string) => Effect.Effect<ShopBaseResponse, ShopeeError>
   readonly captureWithSelections: (
     pageUrl: string,
     opts: SelectionOptions
@@ -46,10 +72,6 @@ export interface ShopeeClientService {
     label: string,
     fn: (page: Page) => Promise<A>
   ) => Effect.Effect<A, ShopeeApiError>
-  readonly cachedText: (
-    key: string,
-    compute: Effect.Effect<string, ShopeeError>
-  ) => Effect.Effect<string, ShopeeError>
   readonly clearCache: Effect.Effect<void>
 }
 
@@ -163,6 +185,44 @@ export class ShopeeClient extends Context.Service<ShopeeClient, ShopeeClientServ
           )
         }).pipe(Effect.withSpan(`ShopeeClient.capture.${apiMatch}`))
 
+      const ttlForExit = <A, E>(exit: Exit.Exit<A, E>): Duration.Duration =>
+        Exit.isSuccess(exit) ? config.cacheTtl : Duration.zero
+
+      const searchCache = yield* Cache.makeWith(
+        (key: SearchCacheKey) =>
+          capture(shopeeUrl(key.path), "search/search_items", SearchItemsResponse),
+        { capacity: 200, timeToLive: ttlForExit }
+      )
+
+      const productCache = yield* Cache.makeWith(
+        (key: ProductCacheKey) =>
+          capture(shopeeUrl(`/product/${key.shopId}/${key.itemId}`), "pdp/get_pc", PdpResponse),
+        { capacity: 200, timeToLive: ttlForExit }
+      )
+
+      const shopInfoCache = yield* Cache.makeWith(
+        (key: ShopInfoCacheKey) =>
+          capture(shopeeUrl(key.path), "shop/get_shop_base_v2", ShopBaseResponse, {
+            allowAnonymous: true
+          }),
+        { capacity: 200, timeToLive: ttlForExit }
+      )
+
+      const searchItems = Effect.fn("ShopeeClient.searchItems")(function*(searchPath: string) {
+        return yield* Cache.get(searchCache, new SearchCacheKey({ path: searchPath }))
+      })
+
+      const getProductPdp = Effect.fn("ShopeeClient.getProductPdp")(function*(
+        shopId: string,
+        itemId: string
+      ) {
+        return yield* Cache.get(productCache, new ProductCacheKey({ shopId, itemId }))
+      })
+
+      const getShopBase = Effect.fn("ShopeeClient.getShopBase")(function*(shopPath: string) {
+        return yield* Cache.get(shopInfoCache, new ShopInfoCacheKey({ path: shopPath }))
+      })
+
       const captureWithSelections = Effect.fn("ShopeeClient.captureWithSelections")(function*(
         pageUrl: string,
         opts: SelectionOptions
@@ -181,53 +241,26 @@ export class ShopeeClient extends Context.Service<ShopeeClient, ShopeeClientServ
         return yield* browser.captureAll(pageUrl, opts)
       })
 
-      const pendingComputes = new Map<string, Effect.Effect<string, ShopeeError>>()
-
-      const textCache = yield* Cache.makeWith(
-        (key: string): Effect.Effect<string, ShopeeError> => {
-          const compute = pendingComputes.get(key)
-
-          if (compute === undefined) {
-            return Effect.fail(new ShopeeApiError({ message: `Cache miss without compute for ${key}` }))
-          }
-
-          return compute.pipe(
-            Effect.ensuring(
-              Effect.sync(() => {
-                pendingComputes.delete(key)
-              })
-            )
-          )
-        },
-        {
-          capacity: 200,
-          timeToLive: (exit) => (Exit.isSuccess(exit) ? config.cacheTtl : Duration.zero)
-        }
+      const clearCache = Effect.all(
+        [
+          Cache.invalidateAll(searchCache),
+          Cache.invalidateAll(productCache),
+          Cache.invalidateAll(shopInfoCache)
+        ],
+        { discard: true }
       )
-
-      const cachedText = (
-        key: string,
-        compute: Effect.Effect<string, ShopeeError>
-      ): Effect.Effect<string, ShopeeError> =>
-        Effect.suspend(() => {
-          if (!pendingComputes.has(key)) {
-            pendingComputes.set(key, compute)
-          }
-
-          return Cache.get(textCache, key)
-        })
-
-      const clearCache = Cache.invalidateAll(textCache)
 
       return ShopeeClient.of({
         shopeeUrl,
         isLoggedIn: browser.isLoggedIn,
         requireLogin,
         capture,
+        searchItems,
+        getProductPdp,
+        getShopBase,
         captureWithSelections,
         captureAll,
         withPage: browser.withPage,
-        cachedText,
         clearCache
       })
     })
