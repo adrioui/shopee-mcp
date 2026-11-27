@@ -4,9 +4,6 @@ import type { CollectedResponse, JsonValue } from "../api/Schemas.js"
 import { AppConfig } from "../Config.js"
 import { ShopeeApiError } from "../Errors.js"
 
-const USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-
 const decodeJsonValue = Schema.decodeUnknownOption(Schema.Json)
 
 export interface CaptureOptions {
@@ -135,10 +132,10 @@ export class BrowserSession extends Context.Service<BrowserSession, BrowserSessi
             Parameters<typeof chromium.launchPersistentContext>[1]
           > = {
             headless,
-            userAgent: USER_AGENT,
             locale: config.locale,
             timezoneId: config.timezone,
             viewport: { width: 1366, height: 768 },
+            ignoreDefaultArgs: ["--enable-automation"],
             args: [
               "--disable-blink-features=AutomationControlled",
               "--no-sandbox",
