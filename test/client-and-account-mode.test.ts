@@ -104,6 +104,29 @@ describe("ShopeeClient capture retry, auth fast-fail, and typed Cache.makeWith",
       assert.deepStrictEqual(res, { error: 0, items: ["ok"] })
     }))
 
+  it.effect("reports anti-bot 90309999 as ShopeeApiError when session is already logged in", () =>
+    Effect.gen(function*() {
+      const browserLayer = makeBrowserStub({
+        isLoggedIn: Effect.succeed(true),
+        captureJson: () => Effect.succeed({ error: 90309999 })
+      })
+
+      const exit = yield* Effect.gen(function*() {
+        const client = yield* ShopeeClient
+
+        return yield* client.capture("https://x", "search/search_items", SimpleResponse)
+      }).pipe(
+        Effect.provide(ShopeeClient.layer),
+        Effect.provide(browserLayer),
+        Effect.provide(AppConfig.layerTest()),
+        Effect.exit
+      )
+
+      assert.isTrue(Exit.isFailure(exit))
+      assert.include(String(exit), "90309999")
+      assert.include(String(exit), "CAPTCHA")
+    }))
+
   it.effect("fails fast with ShopeeAuthRequiredError when signed out without calling capture", () =>
     Effect.gen(function*() {
       let calls = 0

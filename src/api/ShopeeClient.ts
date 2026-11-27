@@ -141,7 +141,18 @@ export class ShopeeClient extends Context.Service<ShopeeClient, ShopeeClientServ
             const code = envelope.value.error
 
             if (code === SHOPEE_ANTIBOT_ERROR) {
-              return yield* new ShopeeAuthRequiredError({ endpoint: apiMatch })
+              const loggedIn = yield* browser.isLoggedIn
+
+              if (!loggedIn) {
+                return yield* new ShopeeAuthRequiredError({ endpoint: apiMatch })
+              }
+
+              return yield* new ShopeeApiError({
+                message: `Shopee anti-bot / CAPTCHA verification triggered (error ${SHOPEE_ANTIBOT_ERROR}) for ${apiMatch}. Open Shopee in the browser profile (pnpm run login) to complete verification.`,
+                statusCode: 200,
+                endpoint: apiMatch,
+                shopeeError: SHOPEE_ANTIBOT_ERROR
+              })
             }
 
             if (code !== undefined && code !== null && code !== 0) {
