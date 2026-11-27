@@ -65,7 +65,6 @@
   ],
   "dependencies": {
     "@effect/platform-node": "^4.1.6",
-    "cloakbrowser": "^0.5.5",
     "effect": "^4.1.6",
     "playwright": "^1.49.0"
   },
